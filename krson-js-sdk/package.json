@@ -1,0 +1,20 @@
+{
+  "name": "krson",
+  "version": "2.0.0",
+  "description": "KRSON v2 — faster than JSON, schema-first binary format",
+  "main": "index.js",
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node test.js"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "^2.18.0"
+  },
+  "napi": {
+    "name": "krson",
+    "triples": {
+      "defaults": true
+    }
+  }
+}
