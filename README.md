@@ -19,7 +19,7 @@ JSON.parse() always parses the *entire* object, even if you only need one field.
 ## Install
 
 ```bash
-npm install krson
+npm install krson-js
 ```
 
 ## Quick Start
