@@ -1,6 +1,6 @@
 {
   "name": "krson",
-  "version": "2.2.0",
+  "version": "2.3.0",
   "description": "KRSON v2 — Binary format. schema.get() 2.9x faster than JSON, 21% smaller payload",
   "main": "index.js",
   "browser": "browser.js",
