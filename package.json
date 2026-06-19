@@ -1,20 +1,15 @@
 {
-  "name": "krson",
-  "version": "2.0.0",
-  "description": "KRSON v2 — faster than JSON, schema-first binary format",
+  "name": "krson-js",
+  "version": "2.1.0",
+  "description": "Binary format faster than JSON for single-field and multi-field access. 10x faster field reads, 26% smaller payloads, zero native dependencies.",
   "main": "index.js",
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
     "test": "node test.js"
   },
-  "devDependencies": {
-    "@napi-rs/cli": "^2.18.0"
-  },
-  "napi": {
-    "name": "krson",
-    "triples": {
-      "defaults": true
-    }
+  "keywords": ["binary", "serialization", "json", "format", "performance", "schema"],
+  "license": "MIT",
+  "files": ["index.js", "README.md"],
+  "engines": {
+    "node": ">=14"
   }
 }
