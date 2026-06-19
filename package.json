@@ -1,5 +1,5 @@
 {
-  "name": "krson",
+  "name": "krson-js",
   "version": "2.3.0",
   "description": "KRSON v2 — Binary format. schema.get() 2.9x faster than JSON, 21% smaller payload",
   "main": "index.js",
@@ -39,6 +39,6 @@
     "node": ">=16.0.0"
   },
   "bin": {
-    "krson": "./index.js"
+    "krson-js": "./index.js"
   }
 }
