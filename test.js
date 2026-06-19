@@ -1,84 +1,132 @@
-'use strict';
-const { KRSON } = require('./index.js');
+const { defineSchema, encode, decode, validate } = require('./index.js');
 
-const data = {
-    name: 'Alice', age: 30, score: 98.5, active: true,
-    tags: ['admin', 'user'],
-    metadata: { ip: '192.168.1.1', country: 'IN' },
-};
-
-const schema = KRSON.defineSchema({
-    name: 'string', age: 'varint', score: 'float64',
-    active: 'bool', tags: 'array', metadata: 'object',
+// ─── Setup schema ─────────────────────────────────────────────────────────────
+const userSchema = defineSchema({
+  name:   'string',
+  age:    'varint',
+  score:  'float64',
+  active: 'bool',
+  tags:   'array',
+  meta:   'object',
 });
 
+const user = {
+  name:   'Alice',
+  age:    30,
+  score:  98.5,
+  active: true,
+  tags:   ['admin', 'user'],
+  meta:   { country: 'IN', ip: '192.168.1.1' },
+};
+
+// ─── Correctness ──────────────────────────────────────────────────────────────
 console.log('=== Correctness ===');
-const buf = schema.encode(data);
-const out = schema.decode(buf);
-console.log('  name  :', out.name === 'Alice' ? '✓' : '✗', out.name);
-console.log('  age   :', out.age === 30 ? '✓' : '✗', out.age);
-console.log('  score :', out.score === 98.5 ? '✓' : '✗', out.score);
-console.log('  active:', out.active === true ? '✓' : '✗');
-console.log('  tags  :', JSON.stringify(out.tags));
-console.log('  meta  :', JSON.stringify(out.metadata));
-console.log('  get age:', schema.get(buf, 'age'));
-console.log('  getMany:', JSON.stringify(schema.getMany(buf, ['name','age','score'])));
+const buf = userSchema.encode(user);
+const obj = userSchema.decode(buf);
 
-// JSON ↔ KRSON conversion (server compatibility)
-console.log('\n=== JSON ↔ KRSON Conversion ===');
-const serverJson = '{"name":"Bob","age":25,"score":77.5,"active":false,"tags":["user"],"metadata":{"ip":"10.0.0.1","country":"US"}}';
+console.log('  name    :', obj.name   === 'Alice'  ? '✓ Alice'  : '✗ ' + obj.name);
+console.log('  age     :', obj.age    === 30        ? '✓ 30'     : '✗ ' + obj.age);
+console.log('  score   :', Math.abs(obj.score - 98.5) < 0.001 ? '✓ 98.5' : '✗ ' + obj.score);
+console.log('  active  :', obj.active === true      ? '✓ true'   : '✗ ' + obj.active);
+console.log('  tags    :', JSON.stringify(obj.tags));
+console.log('  meta    :', JSON.stringify(obj.meta));
+console.log('  get age :', userSchema.get(buf, 'age'));
 
-// Server JSON string → KRSON (schemaless)
-const fromServerBuf = KRSON.jsonToKrson(serverJson);
-const backToObj = KRSON.krsonToJson(fromServerBuf);
-console.log('  jsonToKrson (string)  :', backToObj.name === 'Bob' ? '✓' : '✗', backToObj.name);
+// Schemaless
+const sl = encode({ hello: 'world' });
+const slObj = decode(sl);
+console.log('  schemaless name:', slObj.hello === 'world' ? '✓' : '✗ ' + slObj.hello);
 
-// JS object → KRSON
-const fromObjBuf = KRSON.jsonToKrson(data);
-const backToObj2 = KRSON.krsonToJson(fromObjBuf);
-console.log('  jsonToKrson (object)  :', backToObj2.name === 'Alice' ? '✓' : '✗', backToObj2.name);
+// Validate
+console.log('  validate ✓    :', validate(buf));
+console.log('  validate ✗    :', validate(Buffer.from([0x00, 0x00])));
 
-// Schema-aware JSON → KRSON (smaller, needs schema)
-const schemaBuf = KRSON.jsonToKrsonSchema(schema, serverJson);
-const schemaBack = KRSON.krsonToJsonSchema(schema, schemaBuf);
-console.log('  jsonToKrsonSchema     :', schemaBack.name === 'Bob' ? '✓' : '✗', schemaBack.name, '(', schemaBuf.length, 'bytes)');
+// getMany
+const many = userSchema.getMany(buf, ['name', 'age', 'score']);
+console.log('  getMany name  :', many.name  === 'Alice' ? '✓ Alice' : '✗ ' + many.name);
+console.log('  getMany age   :', many.age   === 30      ? '✓ 30'    : '✗ ' + many.age);
+console.log('  getMany score :', Math.abs(many.score - 98.5) < 0.001 ? '✓ 98.5' : '✗ ' + many.score);
 
+// ─── Benchmark ────────────────────────────────────────────────────────────────
 const N = 1_000_000;
-const jsonStr = JSON.stringify(data);
-const krsonBuf = schema.encode(data);
+console.log(`\n=== Benchmark (${N.toLocaleString()} iterations) ===`);
 
-function bench(label, fn) {
-    for (let i = 0; i < 1000; i++) fn();
-    const t0 = process.hrtime.bigint();
-    for (let i = 0; i < N; i++) fn();
-    const t1 = process.hrtime.bigint();
-    const ms = Number(t1 - t0) / 1e6;
-    console.log(`  ${label.padEnd(28)} ${ms.toFixed(0).padStart(8)}ms`);
-    return ms;
-}
+const jsonStr = JSON.stringify(user);
 
-console.log('\n=== Benchmark (1,000,000 iterations) ===\n');
-
+// ENCODE
 console.log('ENCODE:');
-const ke = bench('KRSON schema.encode()', () => schema.encode(data));
-const je = bench('JSON.stringify()',      () => JSON.stringify(data));
-console.log(`  → ${ke < je ? (je/ke).toFixed(1)+'x FASTER ✅' : (ke/je).toFixed(1)+'x slower'}\n`);
 
+let t = Date.now();
+for (let i = 0; i < N; i++) userSchema.encode(user);
+const krsonEncodeMs = Date.now() - t;
+
+t = Date.now();
+for (let i = 0; i < N; i++) JSON.stringify(user);
+const jsonEncodeMs = Date.now() - t;
+
+const encodeRatio = (krsonEncodeMs / jsonEncodeMs).toFixed(1);
+const encodeLabel = krsonEncodeMs < jsonEncodeMs ? `${(jsonEncodeMs/krsonEncodeMs).toFixed(1)}x FASTER ✅` : `${encodeRatio}x slower`;
+console.log(`  KRSON schema.encode()  ${krsonEncodeMs}ms   ${encodeLabel}`);
+console.log(`  JSON.stringify()       ${jsonEncodeMs}ms`);
+
+// DECODE
 console.log('DECODE:');
-const kd = bench('KRSON schema.decode()', () => schema.decode(krsonBuf));
-const jd = bench('JSON.parse()',          () => JSON.parse(jsonStr));
-console.log(`  → ${kd < jd ? (jd/kd).toFixed(1)+'x FASTER ✅' : (kd/jd).toFixed(1)+'x slower'}\n`);
 
+t = Date.now();
+for (let i = 0; i < N; i++) userSchema.decode(buf);
+const krsonDecodeMs = Date.now() - t;
+
+t = Date.now();
+for (let i = 0; i < N; i++) JSON.parse(jsonStr);
+const jsonDecodeMs = Date.now() - t;
+
+const decodeRatio = (krsonDecodeMs / jsonDecodeMs).toFixed(1);
+const decodeLabel = krsonDecodeMs < jsonDecodeMs ? `${(jsonDecodeMs/krsonDecodeMs).toFixed(1)}x FASTER ✅` : `${decodeRatio}x slower`;
+console.log(`  KRSON schema.decode()  ${krsonDecodeMs}ms   ${decodeLabel}`);
+console.log(`  JSON.parse()           ${jsonDecodeMs}ms`);
+
+// SINGLE FIELD — THE REAL WIN
 console.log('SINGLE FIELD:');
-const kg = bench('KRSON schema.get()',    () => schema.get(krsonBuf, 'age'));
-const jg = bench('JSON.parse()+.field',   () => { const o = JSON.parse(jsonStr); void o.age; });
-console.log(`  → ${kg < jg ? (jg/kg).toFixed(1)+'x FASTER ✅' : (kg/jg).toFixed(1)+'x slower'}\n`);
 
-console.log('MULTI FIELD (3):');
-const km = bench('KRSON getMany(3)',      () => schema.getMany(krsonBuf, ['name','age','score']));
-const jm = bench('JSON.parse()+3fields',  () => { const o = JSON.parse(jsonStr); void o.name; void o.age; void o.score; });
-console.log(`  → ${km < jm ? (jm/km).toFixed(1)+'x FASTER ✅' : (km/jm).toFixed(1)+'x slower'}\n`);
+t = Date.now();
+for (let i = 0; i < N; i++) userSchema.get(buf, 'age');
+const krsonGetMs = Date.now() - t;
 
-const pct = Math.round((1 - krsonBuf.length / Buffer.byteLength(jsonStr)) * 100);
+t = Date.now();
+for (let i = 0; i < N; i++) JSON.parse(jsonStr).age;
+const jsonGetMs = Date.now() - t;
+
+const getLabel = krsonGetMs < jsonGetMs
+  ? `${(jsonGetMs/krsonGetMs).toFixed(1)}x FASTER ✅`
+  : `${(krsonGetMs/jsonGetMs).toFixed(1)}x slower`;
+console.log(`  KRSON schema.get()     ${krsonGetMs}ms   ${getLabel}`);
+console.log(`  JSON.parse() + .field  ${jsonGetMs}ms`);
+
+// PAYLOAD SIZE
 console.log('PAYLOAD SIZE:');
-console.log(`  JSON:  ${Buffer.byteLength(jsonStr)}B   KRSON: ${krsonBuf.length}B  (${pct}% smaller)`);
+const jsonBytes  = Buffer.byteLength(jsonStr);
+const krsonBytes = buf.length;
+const diff = Math.round((1 - krsonBytes / jsonBytes) * 100);
+const sizeLabel = diff > 0 ? `${diff}% smaller ✅` : `${-diff}% larger`;
+console.log(`  JSON:                  ${jsonBytes} bytes`);
+console.log(`  KRSON schema-first:    ${krsonBytes} bytes  (${sizeLabel})`);
+
+// MULTIPLE FIELDS — getMany benchmark
+console.log('MULTIPLE FIELDS (3 fields):');
+
+t = Date.now();
+for (let i = 0; i < N; i++) userSchema.getMany(buf, ['name', 'age', 'score']);
+const krsonManyMs = Date.now() - t;
+
+t = Date.now();
+for (let i = 0; i < N; i++) {
+  const o = JSON.parse(jsonStr);
+  const _ = { name: o.name, age: o.age, score: o.score };
+}
+const jsonManyMs = Date.now() - t;
+
+const manyLabel = krsonManyMs < jsonManyMs
+  ? `${(jsonManyMs/krsonManyMs).toFixed(1)}x FASTER ✅`
+  : `${(krsonManyMs/jsonManyMs).toFixed(1)}x slower`;
+console.log(`  KRSON schema.getMany() ${krsonManyMs}ms   ${manyLabel}`);
+console.log(`  JSON.parse() + 3fields ${jsonManyMs}ms`);

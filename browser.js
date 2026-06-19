@@ -1,16 +1,11 @@
 'use strict';
 
 /**
- * KRSON v2 — Binary format for high-throughput systems
- * Pure JS implementation — no native dependencies, works everywhere
- *
- * npm install krson
- *
- * SINGLE FIELD ACCESS: 2.9x faster than JSON.parse()
- * PAYLOAD SIZE: 21% smaller than JSON
+ * KRSON v2 — Browser build (ArrayBuffer/Uint8Array/DataView based)
+ * Wire-format identical to index.js (Node build) — same bytes on the wire,
+ * just no dependency on Buffer (so it works in React/Vue/plain HTML/Workers).
  */
 
-// ─── Type codes (matches Rust core wire format) ───────────────────────────────
 const TC = {
   NULL:       0x00,
   BOOL_FALSE: 0x01,
@@ -35,25 +30,28 @@ const VERSION = 0x02;
 const FLAG_HAS_STRING_TABLE = 1 << 3;
 const FLAG_HAS_SCHEMA_ID    = 1 << 4;
 
+const _enc = new TextEncoder();
+const _dec = new TextDecoder('utf-8');
+
 // ─── VarInt ───────────────────────────────────────────────────────────────────
 
-function writeVarInt(buf, offset, value) {
+function writeVarInt(arr, offset, value) {
   let v = value < 0 ? -value : value;
   let written = 0;
   do {
     let byte = v & 0x7F;
     v >>>= 7;
     if (v !== 0) byte |= 0x80;
-    buf[offset + written++] = byte;
+    arr[offset + written++] = byte;
   } while (v !== 0);
   return written;
 }
 
-function readVarInt(buf, offset) {
+function readVarInt(arr, offset) {
   let result = 0, shift = 0, bytesRead = 0;
   while (true) {
     if (bytesRead >= 5) throw new Error('VarInt too long');
-    const byte = buf[offset + bytesRead++];
+    const byte = arr[offset + bytesRead++];
     result |= (byte & 0x7F) << shift;
     shift += 7;
     if ((byte & 0x80) === 0) break;
@@ -64,14 +62,13 @@ function readVarInt(buf, offset) {
 // ─── Schema Registry ──────────────────────────────────────────────────────────
 
 let _nextSchemaId = 1;
-const _schemas = new Map(); // id → schema metadata
+const _schemas = new Map();
 
 function defineSchema(def) {
   const id = _nextSchemaId++;
   const fields = Object.keys(def);
   const types  = fields.map(f => def[f]);
 
-  // Precompute fixed offsets (for schema.get() fast path)
   const offsets = new Array(fields.length).fill(null);
   let cursor = 0;
   let fixedSoFar = true;
@@ -90,10 +87,10 @@ function defineSchema(def) {
   _schemas.set(id, { id, fields, types, offsets, fieldIndex });
 
   return {
-    encode(obj)       { return _schemaEncode(id, obj); },
-    decode(buf)       { return _schemaDecode(id, buf); },
-    get(buf, field)   { return _schemaGet(id, buf, field); },
-    getMany(buf, fields) { return _schemaGetMany(id, buf, fields); },
+    encode(obj)          { return _schemaEncode(id, obj); },
+    decode(buf)          { return _schemaDecode(id, buf); },
+    get(buf, field)       { return _schemaGet(id, buf, field); },
+    getMany(buf, fields)  { return _schemaGetMany(id, buf, fields); },
     id,
   };
 }
@@ -104,7 +101,7 @@ function _fixedSize(type) {
     case 'int32':   return 4;
     case 'float64': return 8;
     case 'timestamp': return 8;
-    default:        return null; // varint, string, array, object = variable
+    default:        return null;
   }
 }
 
@@ -114,7 +111,6 @@ function _schemaEncode(schemaId, obj) {
   const schema = _schemas.get(schemaId);
   if (!schema) throw new Error(`Unknown schema ID: ${schemaId}`);
 
-  // Two-pass: collect data, then write
   const parts = [];
   let totalSize = 8; // header
 
@@ -127,80 +123,86 @@ function _schemaEncode(schemaId, obj) {
     totalSize += part.length;
   }
 
-  const buf = Buffer.allocUnsafe(totalSize);
-  // Header: [KR][version][flags][schemaId:4B]
-  buf[0] = MAGIC0; buf[1] = MAGIC1;
-  buf[2] = VERSION;
-  buf[3] = FLAG_HAS_SCHEMA_ID;
-  buf.writeUInt32LE(schemaId, 4);
+  const out = new Uint8Array(totalSize);
+  const view = new DataView(out.buffer);
+
+  out[0] = MAGIC0; out[1] = MAGIC1;
+  out[2] = VERSION;
+  out[3] = FLAG_HAS_SCHEMA_ID;
+  view.setUint32(4, schemaId, true);
 
   let pos = 8;
   for (const part of parts) {
-    part.copy(buf, pos);
+    out.set(part, pos);
     pos += part.length;
   }
 
-  return buf;
+  return out;
 }
 
 function _encodeValue(val, type) {
   if (val === null || val === undefined) {
-    return Buffer.from([TC.NULL]);
+    return new Uint8Array([TC.NULL]);
   }
 
   switch (type) {
     case 'bool': {
-      return Buffer.from([val ? TC.BOOL_TRUE : TC.BOOL_FALSE]);
+      return new Uint8Array([val ? TC.BOOL_TRUE : TC.BOOL_FALSE]);
     }
     case 'varint': {
       const isNeg = val < 0;
-      const tmp = Buffer.allocUnsafe(6);
+      const tmp = new Uint8Array(6);
       tmp[0] = isNeg ? TC.VARINT_NEG : TC.VARINT;
       const n = writeVarInt(tmp, 1, Math.abs(val));
       return tmp.slice(0, 1 + n);
     }
     case 'int32': {
-      const b = Buffer.allocUnsafe(5);
+      const b = new Uint8Array(5);
+      const v = new DataView(b.buffer);
       b[0] = TC.INT32;
-      b.writeInt32LE(val, 1);
+      v.setInt32(1, val, true);
       return b;
     }
     case 'float64': {
-      const b = Buffer.allocUnsafe(9);
+      const b = new Uint8Array(9);
+      const v = new DataView(b.buffer);
       b[0] = TC.FLOAT64;
-      b.writeDoubleBE(val, 1);
+      v.setFloat64(1, val, false); // big-endian, matches Node build
       return b;
     }
     case 'string': {
-      const strBuf = Buffer.from(val, 'utf8');
-      const b = Buffer.allocUnsafe(5 + strBuf.length);
+      const strBuf = _enc.encode(val);
+      const b = new Uint8Array(5 + strBuf.length);
+      const v = new DataView(b.buffer);
       b[0] = TC.STRING;
-      b.writeUInt32LE(strBuf.length, 1);
-      strBuf.copy(b, 5);
+      v.setUint32(1, strBuf.length, true);
+      b.set(strBuf, 5);
       return b;
     }
     case 'array':
     case 'object': {
-      const json = Buffer.from(JSON.stringify(val), 'utf8');
-      const b = Buffer.allocUnsafe(5 + json.length);
-      b[0] = TC.STRING; // stored as JSON string for now
-      b.writeUInt32LE(json.length, 1);
-      json.copy(b, 5);
+      const json = _enc.encode(JSON.stringify(val));
+      const b = new Uint8Array(5 + json.length);
+      const v = new DataView(b.buffer);
+      b[0] = TC.STRING;
+      v.setUint32(1, json.length, true);
+      b.set(json, 5);
       return b;
     }
     case 'timestamp': {
-      const b = Buffer.allocUnsafe(9);
+      const b = new Uint8Array(9);
+      const v = new DataView(b.buffer);
       b[0] = TC.TIMESTAMP;
-      b.writeBigInt64LE(BigInt(val), 1);
+      v.setBigInt64(1, BigInt(val), true);
       return b;
     }
     default: {
-      // fallback: JSON string
-      const json = Buffer.from(JSON.stringify(val), 'utf8');
-      const b = Buffer.allocUnsafe(5 + json.length);
+      const json = _enc.encode(JSON.stringify(val));
+      const b = new Uint8Array(5 + json.length);
+      const v = new DataView(b.buffer);
       b[0] = TC.STRING;
-      b.writeUInt32LE(json.length, 1);
-      json.copy(b, 5);
+      v.setUint32(1, json.length, true);
+      b.set(json, 5);
       return b;
     }
   }
@@ -212,13 +214,14 @@ function _schemaDecode(schemaId, buf) {
   const schema = _schemas.get(schemaId);
   if (!schema) throw new Error(`Unknown schema ID: ${schemaId}`);
 
-  _checkMagic(buf);
-  let pos = 8; // skip header
+  const u8 = _toUint8(buf);
+  _checkMagic(u8);
+  let pos = 8;
   const result = {};
 
   for (let i = 0; i < schema.fields.length; i++) {
     const field = schema.fields[i];
-    const { value, bytesRead } = _decodeValue(buf, pos);
+    const { value, bytesRead } = _decodeValue(u8, pos);
     result[field] = value;
     pos += bytesRead;
   }
@@ -226,7 +229,7 @@ function _schemaDecode(schemaId, buf) {
   return result;
 }
 
-// ─── schema.get() — THE FAST PATH ────────────────────────────────────────────
+// ─── schema.get() — fast path ────────────────────────────────────────────────
 
 function _schemaGet(schemaId, buf, fieldName) {
   const schema = _schemas.get(schemaId);
@@ -235,41 +238,37 @@ function _schemaGet(schemaId, buf, fieldName) {
   const idx = schema.fieldIndex[fieldName];
   if (idx === undefined) throw new Error(`Field not found: ${fieldName}`);
 
-  _checkMagic(buf);
+  const u8 = _toUint8(buf);
+  _checkMagic(u8);
 
-  // Fast path: precomputed offset → direct read, no parsing of other fields
   if (schema.offsets[idx] !== null) {
-    const pos = 8 + schema.offsets[idx]; // 8 = header size
-    return _decodeValue(buf, pos).value;
+    const pos = 8 + schema.offsets[idx];
+    return _decodeValue(u8, pos).value;
   }
 
-  // Slow path: scan from last known offset
   let lastKnownIdx = idx - 1;
   while (lastKnownIdx >= 0 && schema.offsets[lastKnownIdx] === null) lastKnownIdx--;
 
-  let pos = lastKnownIdx >= 0
-    ? 8 + schema.offsets[lastKnownIdx]
-    : 8;
+  let pos = lastKnownIdx >= 0 ? 8 + schema.offsets[lastKnownIdx] : 8;
   let startIdx = lastKnownIdx >= 0 ? lastKnownIdx : 0;
 
-  // Skip fields we don't need
   for (let i = startIdx; i < idx; i++) {
-    const { bytesRead } = _decodeValue(buf, pos);
+    const { bytesRead } = _decodeValue(u8, pos);
     pos += bytesRead;
   }
 
-  return _decodeValue(buf, pos).value;
+  return _decodeValue(u8, pos).value;
 }
 
-// ─── schema.getMany() — multiple fields, one pass ────────────────────────────
+// ─── schema.getMany() ─────────────────────────────────────────────────────────
 
 function _schemaGetMany(schemaId, buf, fieldNames) {
   const schema = _schemas.get(schemaId);
   if (!schema) throw new Error(`Unknown schema ID: ${schemaId}`);
 
-  _checkMagic(buf);
+  const u8 = _toUint8(buf);
+  _checkMagic(u8);
 
-  // Sort requested fields by their index so we scan left→right only once
   const requests = fieldNames.map(name => {
     const idx = schema.fieldIndex[name];
     if (idx === undefined) throw new Error(`Field not found: ${name}`);
@@ -277,18 +276,16 @@ function _schemaGetMany(schemaId, buf, fieldNames) {
   }).sort((a, b) => a.idx - b.idx);
 
   const result = {};
-  let pos = 8;         // start after header
-  let currentIdx = 0;  // which field position we're at in the buffer
+  let pos = 8;
+  let currentIdx = 0;
 
   for (const req of requests) {
-    // Skip fields between current position and the one we want
     while (currentIdx < req.idx) {
-      const { bytesRead } = _decodeValue(buf, pos);
+      const { bytesRead } = _decodeValue(u8, pos);
       pos += bytesRead;
       currentIdx++;
     }
-    // Read the field we want
-    const { value, bytesRead } = _decodeValue(buf, pos);
+    const { value, bytesRead } = _decodeValue(u8, pos);
     result[req.name] = value;
     pos += bytesRead;
     currentIdx++;
@@ -299,8 +296,9 @@ function _schemaGetMany(schemaId, buf, fieldNames) {
 
 // ─── Value decoder ────────────────────────────────────────────────────────────
 
-function _decodeValue(buf, pos) {
-  const tc = buf[pos];
+function _decodeValue(u8, pos) {
+  const tc = u8[pos];
+  const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
 
   switch (tc) {
     case TC.NULL:
@@ -311,28 +309,27 @@ function _decodeValue(buf, pos) {
       return { value: true, bytesRead: 1 };
 
     case TC.VARINT: {
-      const { value, bytesRead } = readVarInt(buf, pos + 1);
+      const { value, bytesRead } = readVarInt(u8, pos + 1);
       return { value, bytesRead: 1 + bytesRead };
     }
     case TC.VARINT_NEG: {
-      const { value, bytesRead } = readVarInt(buf, pos + 1);
+      const { value, bytesRead } = readVarInt(u8, pos + 1);
       return { value: -value, bytesRead: 1 + bytesRead };
     }
 
     case TC.INT32:
-      return { value: buf.readInt32LE(pos + 1), bytesRead: 5 };
+      return { value: view.getInt32(pos + 1, true), bytesRead: 5 };
 
     case TC.FLOAT64:
-      return { value: buf.readDoubleBE(pos + 1), bytesRead: 9 };
+      return { value: view.getFloat64(pos + 1, false), bytesRead: 9 };
 
     case TC.TIMESTAMP:
-      return { value: Number(buf.readBigInt64LE(pos + 1)), bytesRead: 9 };
+      return { value: Number(view.getBigInt64(pos + 1, true)), bytesRead: 9 };
 
     case TC.STRING:
     case TC.STRING_REF: {
-      const len = buf.readUInt32LE(pos + 1);
-      const str = buf.toString('utf8', pos + 5, pos + 5 + len);
-      // Try JSON parse for arrays/objects
+      const len = view.getUint32(pos + 1, true);
+      const str = _dec.decode(u8.subarray(pos + 5, pos + 5 + len));
       let value = str;
       if (str[0] === '[' || str[0] === '{') {
         try { value = JSON.parse(str); } catch (_) {}
@@ -348,69 +345,72 @@ function _decodeValue(buf, pos) {
 // ─── Schemaless encode / decode ───────────────────────────────────────────────
 
 function encode(obj) {
-  const payload = Buffer.from(JSON.stringify(obj), 'utf8');
-  const buf = Buffer.allocUnsafe(8 + 1 + 4 + payload.length);
-  buf[0] = MAGIC0; buf[1] = MAGIC1;
-  buf[2] = VERSION; buf[3] = 0;
-  buf.writeUInt32LE(0, 4); // no schema id
-  buf[8] = TC.STRING;
-  buf.writeUInt32LE(payload.length, 9);
-  payload.copy(buf, 13);
-  return buf;
+  const payload = _enc.encode(JSON.stringify(obj));
+  const out = new Uint8Array(8 + 1 + 4 + payload.length);
+  const view = new DataView(out.buffer);
+  out[0] = MAGIC0; out[1] = MAGIC1;
+  out[2] = VERSION; out[3] = 0;
+  view.setUint32(4, 0, true);
+  out[8] = TC.STRING;
+  view.setUint32(9, payload.length, true);
+  out.set(payload, 13);
+  return out;
 }
 
 function decode(buf) {
-  _checkMagic(buf);
-  return _decodeValue(buf, 8).value;
+  const u8 = _toUint8(buf);
+  _checkMagic(u8);
+  return _decodeValue(u8, 8).value;
 }
 
 function validate(buf) {
   try {
-    if (!Buffer.isBuffer(buf) && !(buf instanceof Uint8Array)) return false;
-    if (buf.length < 8) return false;
-    if (buf[0] !== MAGIC0 || buf[1] !== MAGIC1) return false;
-    if (buf[2] !== VERSION) return false;
+    const u8 = _toUint8(buf);
+    if (u8.length < 8) return false;
+    if (u8[0] !== MAGIC0 || u8[1] !== MAGIC1) return false;
+    if (u8[2] !== VERSION) return false;
     return true;
   } catch (_) { return false; }
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function _checkMagic(buf) {
-  if (buf[0] !== MAGIC0 || buf[1] !== MAGIC1) {
-    throw new Error(`Invalid KRSON magic bytes: 0x${buf[0].toString(16)} 0x${buf[1].toString(16)}`);
+function _toUint8(buf) {
+  if (buf instanceof Uint8Array) return buf;
+  if (buf instanceof ArrayBuffer) return new Uint8Array(buf);
+  throw new Error('KRSON (browser): expected Uint8Array or ArrayBuffer');
+}
+
+function _checkMagic(u8) {
+  if (u8[0] !== MAGIC0 || u8[1] !== MAGIC1) {
+    throw new Error(`Invalid KRSON magic bytes: 0x${u8[0].toString(16)} 0x${u8[1].toString(16)}`);
   }
 }
 
-// ─── Exports ──────────────────────────────────────────────────────────────────
-
-const KRSON = { defineSchema, encode, decode, validate };
-module.exports = { KRSON, defineSchema, encode, decode, validate };
-
-// ─── KRSON.inspect() — decode buffer without schema ──────────────────────────
+// ─── inspect() / prettyPrint() — same as Node build ───────────────────────────
 
 function inspect(buf, schema) {
   if (!validate(buf)) return { error: 'Invalid KRSON buffer' };
   if (schema) return schema.decode(buf);
-  // schemaless — try to decode the value at offset 8
   try {
-    return _decodeValue(buf, 8).value;
-  } catch(e) {
+    const u8 = _toUint8(buf);
+    return _decodeValue(u8, 8).value;
+  } catch (e) {
     return { error: e.message };
   }
 }
 
-// ─── KRSON.prettyPrint() — human readable output ─────────────────────────────
-
 function prettyPrint(buf, schema) {
-  const obj = inspect(buf, schema);
-  const schemaId = buf.readUInt32LE ? buf.readUInt32LE(4) : new DataView(buf.buffer).getUint32(4, true);
+  const u8 = _toUint8(buf);
+  const view = new DataView(u8.buffer, u8.byteOffset, u8.byteLength);
+  const obj = inspect(u8, schema);
+  const schemaId = view.getUint32(4, true);
   const lines = [];
   lines.push('┌─ KRSON Packet ─────────────────────────');
   lines.push(`│  magic    : KR (0x4B 0x52)`);
-  lines.push(`│  version  : v${buf[2]}`);
+  lines.push(`│  version  : v${u8[2]}`);
   lines.push(`│  schema   : ${schemaId === 0 ? 'schemaless' : `#${schemaId}`}`);
-  lines.push(`│  size     : ${buf.length} bytes`);
+  lines.push(`│  size     : ${u8.length} bytes`);
   lines.push('├─ Fields ───────────────────────────────');
   if (obj && typeof obj === 'object' && !obj.error) {
     const keys = Object.keys(obj);
@@ -428,21 +428,8 @@ function prettyPrint(buf, schema) {
   return out;
 }
 
-// ─── npx krson inspect — CLI support ─────────────────────────────────────────
+// ─── Exports ──────────────────────────────────────────────────────────────────
 
-function _cliInspect() {
-  const fs = require('fs');
-  const file = process.argv[3];
-  if (!file) { console.error('Usage: npx krson inspect <file.krson>'); process.exit(1); }
-  const buf = fs.readFileSync(file);
-  prettyPrint(buf, null);
-}
+const KRSON = { defineSchema, encode, decode, validate, inspect, prettyPrint };
 
-if (require.main === module && process.argv[2] === 'inspect') {
-  _cliInspect();
-}
-
-// ─── Re-export with new methods ───────────────────────────────────────────────
-KRSON.inspect    = inspect;
-KRSON.prettyPrint = prettyPrint;
 module.exports = { KRSON, defineSchema, encode, decode, validate, inspect, prettyPrint };

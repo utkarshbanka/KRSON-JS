@@ -1,15 +1,44 @@
 {
-  "name": "krson-js",
-  "version": "2.1.0",
-  "description": "Binary format faster than JSON for single-field and multi-field access. 10x faster field reads, 26% smaller payloads, zero native dependencies.",
+  "name": "krson",
+  "version": "2.2.0",
+  "description": "KRSON v2 — Binary format. schema.get() 2.9x faster than JSON, 21% smaller payload",
   "main": "index.js",
+  "browser": "browser.js",
+  "exports": {
+    ".": {
+      "node": "./index.js",
+      "browser": "./browser.js",
+      "default": "./index.js"
+    }
+  },
+  "files": [
+    "index.js",
+    "browser.js",
+    "README.md"
+  ],
   "scripts": {
     "test": "node test.js"
   },
-  "keywords": ["binary", "serialization", "json", "format", "performance", "schema"],
+  "keywords": [
+    "binary",
+    "serialization",
+    "schema",
+    "json-alternative",
+    "performance",
+    "zero-copy",
+    "protocol"
+  ],
+  "author": "Utkarsh Keshari <utkarsh.k.keshari@gmail.com>",
   "license": "MIT",
-  "files": ["index.js", "README.md"],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/utkarshbanka/KRSON"
+  },
+  "homepage": "https://github.com/utkarshbanka/KRSON#readme",
   "engines": {
-    "node": ">=14"
+    "node": ">=16.0.0"
+  },
+  "bin": {
+    "krson": "./index.js"
   }
 }

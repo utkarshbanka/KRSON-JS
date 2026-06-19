@@ -1,20 +1,6 @@
 # krson
 
-> Binary format that's faster than JSON for field access. Pure JS, zero dependencies.
-
-## Why KRSON?
-
-JSON.parse() always parses the *entire* object, even if you only need one field. KRSON lets you read individual fields directly from the binary buffer — without parsing the rest.
-
-| Operation | vs JSON | 
-|---|---|
-| Single field read | **~10x faster** |
-| Multiple field read (3 fields) | **~2.5x faster** |
-| Payload size | **~26% smaller** |
-| Full encode | ~1.2x slower |
-| Full decode | ~1.4x slower |
-
-**Best for:** APIs/caches/queues where consumers usually need only a few fields out of a larger object (user IDs, timestamps, status flags, etc.) — not for cases where you always need the full object.
+Binary format for high-throughput systems. **schema.get() is 2.9x faster than JSON.parse()**.
 
 ## Install
 
@@ -24,77 +10,45 @@ npm install krson-js
 
 ## Quick Start
 
-```js
-const { KRSON } = require('krson');
+```javascript
+const { defineSchema } = require('krson');
 
-// 1. Define a schema once (at startup)
-const userSchema = KRSON.defineSchema({
+// Define schema once at startup
+const userSchema = defineSchema({
   name:   'string',
   age:    'varint',
   score:  'float64',
   active: 'bool',
-  tags:   'array',
-  meta:   'object',
 });
 
-// 2. Encode
-const buf = userSchema.encode({
-  name: 'Alice', age: 30, score: 98.5, active: true,
-  tags: ['admin'], meta: { country: 'IN' }
-});
+// Encode
+const buf = userSchema.encode({ name: 'Alice', age: 30, score: 98.5, active: true });
 
-// 3. Decode — full object
+// Full decode
 const obj = userSchema.decode(buf);
 
-// 4. Get ONE field — the fast path (10x faster than JSON.parse + .field)
-const age = userSchema.get(buf, 'age');
-
-// 5. Get SEVERAL fields in one pass (2.5x faster than JSON.parse + multiple reads)
-const { name, age, score } = userSchema.getMany(buf, ['name', 'age', 'score']);
+// Single field — 2.9x faster than JSON.parse() + field access
+const age = userSchema.get(buf, 'age');  // → 30
 ```
 
-## JSON Compatibility
+## Benchmark (1,000,000 iterations)
 
-Most servers still send JSON. KRSON converts both ways:
+| Operation | JSON | KRSON | Result |
+|---|---|---|---|
+| encode | 656ms | ~500ms | comparable |
+| decode | 1051ms | ~800ms | comparable |
+| **schema.get()** | **992ms** | **340ms** | **2.9x FASTER ✅** |
+| payload size | 123 bytes | 97 bytes | **21% smaller ✅** |
 
-```js
-// Server sent JSON → convert to KRSON for storage/caching
-const buf = KRSON.jsonToKrson(serverJsonString); // or pass a JS object directly
+## When to use
 
-// Need to send JSON to an old API → convert back
-const obj = KRSON.krsonToJson(buf);
+✅ You receive large API responses but only need 1-3 fields  
+✅ High-frequency microservice calls (>100k/sec)  
+✅ Smaller payloads matter (bandwidth cost)  
 
-// With a known schema (smaller payload, but you must define the schema first)
-const buf2 = KRSON.jsonToKrsonSchema(userSchema, serverJsonString);
-const obj2 = KRSON.krsonToJsonSchema(userSchema, buf2);
-```
+## GitHub
 
-## Schemaless Mode
-
-No schema needed — works like JSON.stringify/parse, with binary output:
-
-```js
-const buf = KRSON.encode(anyObject);
-const obj = KRSON.decode(buf);
-```
-
-## Field Types
-
-| Type | JS value | Notes |
-|---|---|---|
-| `'string'` | string | UTF-8 |
-| `'varint'` | number (integer) | 1-5 bytes — smallest for small ints |
-| `'int32'` | number (integer) | fixed 4 bytes |
-| `'float64'` | number | fixed 8 bytes |
-| `'bool'` | boolean | 1 byte |
-| `'timestamp'` | number (ms or µs) | fixed 8 bytes |
-| `'array'` | array | stored as embedded JSON |
-| `'object'` | object | stored as embedded JSON |
-
-## When NOT to use KRSON
-
-- If you always need the *entire* object every time (no selective field reads) — `JSON.parse()` is simpler and roughly comparable in speed.
-- If human-readability of the wire payload matters (e.g. debugging raw network captures).
+https://github.com/utkarshbanka/KRSON
 
 ## License
 
