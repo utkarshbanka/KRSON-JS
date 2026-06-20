@@ -1,7 +1,7 @@
 {
   "name": "krson-js",
-  "version": "2.3.1",
-  "description": "KRSON v2 — Binary format. schema.get() 2.9x faster than JSON, 21% smaller payload",
+  "version": "5.0.0",
+  "description": "KRSON v5 — High-performance binary serialization. Native arrays/maps, ZigZag, offset tables, string dedup. 2-5x faster, 30-50% smaller than JSON.",
   "main": "index.js",
   "browser": "browser.js",
   "exports": {
