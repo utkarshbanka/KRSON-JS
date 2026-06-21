@@ -68,6 +68,25 @@ This is the same general idea behind formats like FlatBuffers (zero-copy access)
 
 The same wire format is read by both the Node build (`index.js`, uses `Buffer`) and the browser build (`browser.js`, uses `ArrayBuffer`/`Uint8Array`/`DataView`) — same bytes on the wire either way, so a Node server and a browser client can talk KRSON to each other directly over `fetch`/HTTP.
 
+### Codebase architecture
+
+The Node build's logic lives in `src/`, split by concern:
+
+| Module | Responsibility |
+|---|---|
+| `src/constants.js` | Wire-format constants: type codes, magic bytes, version, flags |
+| `src/varint.js` | VarInt + ZigZag integer encoding (the 64-bit-safe integer compaction layer) |
+| `src/crc32.js` | Opt-in CRC32 checksum + verification |
+| `src/schema-registry.js` | `defineSchema()`/`disposeSchema()`, field auto-reordering, offset computation |
+| `src/encode.js` | Schema-mode and schemaless encode (size pass + write pass) |
+| `src/decode.js` | Schema-mode and schemaless decode/get/getMany, the value decoder, structural skip-scanning |
+| `src/validate.js` | Magic-byte / version / schema-ID validation |
+| `src/debug.js` | `inspect()` / `prettyPrint()` |
+
+`index.js` itself is just the wiring: it imports these modules, exposes the public API, and implements the `npx krson inspect` CLI.
+
+`browser.js` is intentionally still a single file. It mirrors `src/`'s logic using `Uint8Array`/`DataView` instead of `Buffer`, and merging it into the same modules as the Node build would require an abstraction layer over both binary-buffer APIs — a larger, separately-risky refactor planned for a future version rather than bundled into this one. Today, a change to the wire format has to be applied in both `src/` and `browser.js`; the [`Browser/Node wire-format parity`](https://github.com/utkarshbanka/KRSON-JS/actions) CI job exists specifically to catch the two drifting apart.
+
 ---
 
 ## Install

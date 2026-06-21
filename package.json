@@ -14,6 +14,7 @@
   "files": [
     "index.js",
     "browser.js",
+    "src/",
     "README.md"
   ],
   "scripts": {
