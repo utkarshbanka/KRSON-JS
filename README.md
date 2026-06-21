@@ -1,6 +1,9 @@
 # KRSON
 A binary serialization format for JavaScript — built for when you only need some of the data, not all of it.
 
+[![CI](https://github.com/utkarshbanka/KRSON-JS/actions/workflows/ci.yml/badge.svg)](https://github.com/utkarshbanka/KRSON-JS/actions/workflows/ci.yml)
+[![Nightly Fuzz](https://github.com/utkarshbanka/KRSON-JS/actions/workflows/fuzz-nightly.yml/badge.svg)](https://github.com/utkarshbanka/KRSON-JS/actions/workflows/fuzz-nightly.yml)
+
 > ⚠️ **Status: Testing / Early Stage.** KRSON is usable today (Node + browser), but it's new, the wire format may still change between minor versions, and it hasn't been battle-tested in production at scale. Benchmark numbers below are real, measured on this exact codebase — including the parts where KRSON is not faster. Read the "Honest Numbers" section before you adopt it.
 
 ## Table of Contents
@@ -12,6 +15,7 @@ A binary serialization format for JavaScript — built for when you only need so
 - [Step-by-step: Browser (frontend)](#step-by-step-browser-frontend)
 - [Full API Reference](#full-api-reference)
 - [Benchmarks (honest numbers)](#benchmarks-honest-numbers)
+- [Testing & quality](#testing--quality)
 - [KRSON vs Protobuf vs MessagePack — where it fits](#krson-vs-protobuf-vs-messagepack--where-it-fits)
 - [When to use KRSON / when not to](#when-to-use-krson--when-not-to)
 - [Debugging & inspecting KRSON buffers](#debugging--inspecting-krson-buffers)
@@ -341,6 +345,33 @@ The takeaway: KRSON is not a general JSON replacement. It is a tool for one spec
 
 ---
 
+## Testing & quality
+
+Beyond the benchmark scripts above, KRSON has an automated test suite that runs on every push and pull request via GitHub Actions, across Node 18/20/22 on Linux, Windows, and macOS.
+
+**What's covered:**
+
+| Suite | What it checks | Run it |
+|---|---|---|
+| `test/*.spec.js` (Vitest) | Correctness: schemaless + schema-mode encode/decode, `get()`/`getMany()`, field auto-reorder, CRC32, schema-mismatch detection, 64-bit integer round-tripping, string/JSON-fallback disambiguation | `npm run test:unit` |
+| `test/fuzz.spec.js` | Malformed/adversarial input: truncated buffers, oversized length claims, unknown type codes, bit-flip corruption, random byte buffers, prototype-pollution attempts — every failure path is asserted to throw a clean `Error`, never crash the process | included in `npm run test:unit` |
+| `fuzz.js` | Standalone, longer-running fuzz runner (default 20k iterations/category, configurable). Used for pre-publish deep passes and a nightly scheduled CI job. Supports `--seed=N` for reproducible runs. | `npm run fuzz` / `npm run fuzz:deep` |
+| `test.js`, `test1.js`, `test2.js`, `testhigh.js` | Correctness + performance benchmarks at various scales, including the large-payload and O(1)-offset verification numbers quoted in this README | `npm run test:legacy` |
+
+Run everything locally:
+
+```bash
+npm test          # vitest unit/fuzz suite + all legacy benchmark/correctness scripts
+npm run fuzz       # quick standalone fuzz pass (~20k iterations/category)
+npm run fuzz:deep  # deeper fuzz pass (~200k iterations/category)
+```
+
+**Honest gaps, as of this version:**
+- Fuzzing is structural/randomized at the byte level, not yet coverage-guided (e.g. no AFL/libFuzzer-style instrumentation). It catches crashes and silent-corruption bugs from malformed input, but it isn't a substitute for a dedicated security audit.
+- KRSON is a single-author project at an early version. "Production-ready" here means *the code does what it claims, fails loudly instead of silently, and is covered by tests that catch regressions* — not that it has years of large-scale production usage behind it yet. Schema migration / versioned-evolution support is still on the [roadmap](#roadmap).
+
+---
+
 ## KRSON vs Protobuf vs MessagePack — where it fits
 
 |  | Protocol Buffers | MessagePack | KRSON |
@@ -411,5 +442,5 @@ MIT
 
 ## Links
 
-- GitHub: https://github.com/utkarshbanka/KRSON
+- GitHub: https://github.com/utkarshbanka/KRSON-JS
 - npm: https://www.npmjs.com/package/krson-js

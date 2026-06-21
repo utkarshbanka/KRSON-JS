@@ -1,3 +1,11 @@
 test.js
-*.md
+test1.js
+test2.js
+testhigh.js
+fuzz.js
+test/
+vitest.config.js
+.github/
+SPEC.md
 .gitignore
+node_modules/

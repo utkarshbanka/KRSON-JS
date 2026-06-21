@@ -38,7 +38,7 @@ const TC = {
 
 const MAGIC0 = 0x4B; // 'K'
 const MAGIC1 = 0x52; // 'R'
-const VERSION = 0x05;
+const VERSION = 0x06; // v6: schemas auto-reorder fixed-size fields first (true O(1) offsets for all of them) + corrected fixed-size byte counts (previous version under-counted the type-code byte for int32/float64/timestamp)
 
 const FLAG_HAS_STRING_TABLE = 1 << 3;
 const FLAG_HAS_SCHEMA_ID    = 1 << 4;
@@ -54,6 +54,17 @@ const FLAG_HAS_CRC          = 1 << 5; // opt-in CRC32 (v5)
 // value passed in here is always >= 0 (zigzag-encoded before this point).
 
 function writeVarInt(buf, offset, value) {
+  if (typeof value === 'bigint') {
+    let v = value;
+    let written = 0;
+    do {
+      let byte = Number(v % 128n);
+      v /= 128n;
+      if (v !== 0n) byte |= 0x80;
+      buf[offset + written++] = byte;
+    } while (v !== 0n);
+    return written;
+  }
   let v = value;
   let written = 0;
   do {
@@ -66,6 +77,13 @@ function writeVarInt(buf, offset, value) {
 }
 
 function varintSize(value) {
+  if (typeof value === 'bigint') {
+    let v = value;
+    let n = 1;
+    v /= 128n;
+    while (v !== 0n) { n++; v /= 128n; }
+    return n;
+  }
   let v = value;
   let n = 1;
   v = Math.floor(v / 128);
@@ -75,26 +93,71 @@ function varintSize(value) {
 
 function readVarInt(buf, offset) {
   let result = 0, mult = 1, bytesRead = 0;
+  let bigResult = null, bigMult = null; // only used once we cross the safe-integer threshold
   while (true) {
     // 10 bytes covers values well beyond Number.MAX_SAFE_INTEGER (2^53 needs ~8)
     if (bytesRead >= 10) throw new Error('VarInt too long (malformed buffer)');
     const byte = buf[offset + bytesRead++];
     if (byte === undefined) throw new Error('VarInt read past end of buffer (truncated/corrupt buffer)');
-    result += (byte & 0x7F) * mult;
-    mult *= 128;
+
+    if (bigResult !== null) {
+      bigResult += BigInt(byte & 0x7F) * bigMult;
+      bigMult *= 128n;
+    } else {
+      result += (byte & 0x7F) * mult;
+      mult *= 128;
+      // Once another byte could push `result` past Number.MAX_SAFE_INTEGER,
+      // switch to BigInt for the remainder so we never silently lose
+      // precision on large (e.g. near-MAX_SAFE_INTEGER zigzag) values.
+      if (mult > Number.MAX_SAFE_INTEGER / 128) {
+        bigResult = BigInt(result);
+        bigMult = BigInt(mult);
+      }
+    }
     if ((byte & 0x80) === 0) break;
+  }
+
+  if (bigResult !== null) {
+    const value = bigResult <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(bigResult) : bigResult;
+    return { value, bytesRead };
   }
   return { value: result, bytesRead };
 }
 
 // ─── ZigZag for signed ints ──────────────────────────────────────────────────
-// FIX: previously used (n << 1) ^ (n >> 31), a 32-bit-only formula. The
-// arithmetic equivalent below is correct for the full safe-integer range.
+// FIX (v5): previously used (n << 1) ^ (n >> 31), a 32-bit-only formula. The
+// arithmetic equivalent n>=0 ? n*2 : -n*2-1 is correct for most of the safe
+// integer range, BUT:
+//
+// FIX (this version): zigzag encoding roughly *doubles* the magnitude of n
+// (n*2, or -n*2-1). For n close to ±Number.MAX_SAFE_INTEGER, the doubled
+// result itself exceeds MAX_SAFE_INTEGER and silently loses precision as a
+// JS double — e.g. zigzagEncode(-9007199254740991) computes
+// 18014398509481981, which cannot be represented exactly as a Number, so it
+// silently rounds and decode() returns the wrong value with the wrong sign.
+// This boundary case (the ~few thousand integers nearest ±MAX_SAFE_INTEGER)
+// is routed through BigInt, which has unlimited precision, while ordinary
+// values stay on the fast plain-number path.
+const ZIGZAG_SAFE_BOUNDARY = Math.floor(Number.MAX_SAFE_INTEGER / 2) - 1;
+
 function zigzagEncode(n) {
-  return n >= 0 ? n * 2 : -n * 2 - 1;
+  if (n <= ZIGZAG_SAFE_BOUNDARY && n >= -ZIGZAG_SAFE_BOUNDARY - 1) {
+    return n >= 0 ? n * 2 : -n * 2 - 1;
+  }
+  const big = BigInt(n);
+  return big >= 0n ? big * 2n : -big * 2n - 1n; // BigInt, handled by writeVarInt's slow path
 }
 
 function zigzagDecode(z) {
+  if (typeof z === 'bigint') {
+    const result = (z % 2n === 0n) ? z / 2n : -(z + 1n) / 2n;
+    // Collapse back to a plain number when it safely fits, so callers get
+    // an ordinary Number in the common case and only see BigInt for values
+    // genuinely beyond Number.MAX_SAFE_INTEGER.
+    return (result <= BigInt(Number.MAX_SAFE_INTEGER) && result >= BigInt(Number.MIN_SAFE_INTEGER))
+      ? Number(result)
+      : result;
+  }
   return (z % 2 === 0) ? z / 2 : -(z + 1) / 2;
 }
 
@@ -134,9 +197,35 @@ const _schemas = new Map(); // id → schema metadata
 
 function defineSchema(def, options = {}) {
   const id = _nextSchemaId++;
-  const fields = Object.keys(def);
-  const types  = fields.map(f => def[f]);
+  const declaredFields = Object.keys(def);
+  const declaredTypes  = declaredFields.map(f => def[f]);
   const useCrc = !!options.crc;
+
+  // FIX: previously, fields kept the user's declared order. Only a *prefix*
+  // of fixed-size types (bool/int32/float64/timestamp) got true O(1) offsets
+  // — the moment a variable-length field (string/varint/array/object)
+  // appeared, every field after it lost the fast path, even other fixed-size
+  // fields declared later. That made schema.get()'s "O(1) random access"
+  // claim misleading for any schema that didn't happen to list all
+  // fixed-size fields first.
+  //
+  // Fix: reorder fields internally so ALL fixed-size fields are written
+  // first (true O(1) offsets for every one of them), followed by
+  // variable-length fields in their original relative order. The reorder
+  // is internal/structural only — encode()/decode() still take and return
+  // objects keyed by field name, so calling code is unaffected. Round-trip
+  // correctness (encode -> decode -> get -> getMany) depends only on
+  // schema.fields/types/offsets/fieldIndex being mutually consistent, which
+  // they are since every accessor below reads from this same schema object.
+  const fixedIdx = [];
+  const variableIdx = [];
+  for (let i = 0; i < declaredFields.length; i++) {
+    if (_fixedSize(declaredTypes[i]) !== null) fixedIdx.push(i);
+    else variableIdx.push(i);
+  }
+  const order = fixedIdx.concat(variableIdx);
+  const fields = order.map(i => declaredFields[i]);
+  const types  = order.map(i => declaredTypes[i]);
 
   // Precompute fixed offsets (for schema.get() fast path)
   const offsets = new Array(fields.length).fill(null);
@@ -177,12 +266,15 @@ function disposeSchema(schemaId) {
 }
 
 function _fixedSize(type) {
+  // +1 for the leading type-code byte every value carries on the wire.
+  // bool needs no separate value byte (TRUE/FALSE is encoded in the
+  // type-code itself), so it's exactly 1.
   switch (type) {
-    case 'bool':    return 1;
-    case 'int32':   return 4;
-    case 'float64': return 8;
-    case 'timestamp': return 8;
-    default:        return null; // varint, string, array, object = variable
+    case 'bool':      return 1;       // type-code only
+    case 'int32':     return 1 + 4;   // type-code + int32
+    case 'float64':   return 1 + 8;   // type-code + float64
+    case 'timestamp': return 1 + 8;   // type-code + int64
+    default:          return null;    // varint, string, array, object = variable
   }
 }
 
@@ -902,6 +994,13 @@ function _checkMagic(buf) {
   }
   if (buf[0] !== MAGIC0 || buf[1] !== MAGIC1) {
     throw new Error(`Invalid KRSON magic bytes: 0x${buf[0].toString(16)} 0x${buf[1].toString(16)}`);
+  }
+  if (buf[2] !== VERSION) {
+    throw new Error(
+      `KRSON version mismatch: buffer was encoded with wire format v${buf[2]}, ` +
+      `but this library is v${VERSION}. Buffers from different KRSON versions ` +
+      `are not guaranteed to be compatible — re-encode with the current version.`
+    );
   }
 }
 

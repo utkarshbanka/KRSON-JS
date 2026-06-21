@@ -34,7 +34,7 @@ const TC = {
 
 const MAGIC0 = 0x4B; // 'K'
 const MAGIC1 = 0x52; // 'R'
-const VERSION = 0x05;
+const VERSION = 0x06; // v6: matches index.js — fixed-size fields auto-reordered first + corrected byte counts
 
 const FLAG_HAS_STRING_TABLE = 1 << 3;
 const FLAG_HAS_SCHEMA_ID    = 1 << 4;
@@ -50,6 +50,17 @@ const _dec = new TextDecoder('utf-8');
 // in JS truncate to 32-bit regardless of the value's real magnitude.
 
 function writeVarInt(arr, offset, value) {
+  if (typeof value === 'bigint') {
+    let v = value;
+    let written = 0;
+    do {
+      let byte = Number(v % 128n);
+      v /= 128n;
+      if (v !== 0n) byte |= 0x80;
+      arr[offset + written++] = byte;
+    } while (v !== 0n);
+    return written;
+  }
   let v = value;
   let written = 0;
   do {
@@ -62,6 +73,13 @@ function writeVarInt(arr, offset, value) {
 }
 
 function varintSize(value) {
+  if (typeof value === 'bigint') {
+    let v = value;
+    let n = 1;
+    v /= 128n;
+    while (v !== 0n) { n++; v /= 128n; }
+    return n;
+  }
   let v = value;
   let n = 1;
   v = Math.floor(v / 128);
@@ -71,23 +89,54 @@ function varintSize(value) {
 
 function readVarInt(arr, offset) {
   let result = 0, mult = 1, bytesRead = 0;
+  let bigResult = null, bigMult = null;
   while (true) {
     if (bytesRead >= 10) throw new Error('VarInt too long (malformed buffer)');
     const byte = arr[offset + bytesRead++];
     if (byte === undefined) throw new Error('VarInt read past end of buffer (truncated/corrupt buffer)');
-    result += (byte & 0x7F) * mult;
-    mult *= 128;
+
+    if (bigResult !== null) {
+      bigResult += BigInt(byte & 0x7F) * bigMult;
+      bigMult *= 128n;
+    } else {
+      result += (byte & 0x7F) * mult;
+      mult *= 128;
+      if (mult > Number.MAX_SAFE_INTEGER / 128) {
+        bigResult = BigInt(result);
+        bigMult = BigInt(mult);
+      }
+    }
     if ((byte & 0x80) === 0) break;
+  }
+
+  if (bigResult !== null) {
+    const value = bigResult <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(bigResult) : bigResult;
+    return { value, bytesRead };
   }
   return { value: result, bytesRead };
 }
 
 // ─── ZigZag for signed ints ──────────────────────────────────────────────────
+// See index.js for the full explanation: zigzag roughly doubles the
+// magnitude of n, so values near ±Number.MAX_SAFE_INTEGER need BigInt to
+// avoid silent precision loss.
+const ZIGZAG_SAFE_BOUNDARY = Math.floor(Number.MAX_SAFE_INTEGER / 2) - 1;
+
 function zigzagEncode(n) {
-  return n >= 0 ? n * 2 : -n * 2 - 1;
+  if (n <= ZIGZAG_SAFE_BOUNDARY && n >= -ZIGZAG_SAFE_BOUNDARY - 1) {
+    return n >= 0 ? n * 2 : -n * 2 - 1;
+  }
+  const big = BigInt(n);
+  return big >= 0n ? big * 2n : -big * 2n - 1n;
 }
 
 function zigzagDecode(z) {
+  if (typeof z === 'bigint') {
+    const result = (z % 2n === 0n) ? z / 2n : -(z + 1n) / 2n;
+    return (result <= BigInt(Number.MAX_SAFE_INTEGER) && result >= BigInt(Number.MIN_SAFE_INTEGER))
+      ? Number(result)
+      : result;
+  }
   return (z % 2 === 0) ? z / 2 : -(z + 1) / 2;
 }
 
@@ -122,9 +171,23 @@ const _schemas = new Map();
 
 function defineSchema(def, options = {}) {
   const id = _nextSchemaId++;
-  const fields = Object.keys(def);
-  const types  = fields.map(f => def[f]);
+  const declaredFields = Object.keys(def);
+  const declaredTypes  = declaredFields.map(f => def[f]);
   const useCrc = !!options.crc;
+
+  // FIX (matches index.js / Node build): reorder so ALL fixed-size fields
+  // come first, giving every one of them true O(1) offsets instead of just
+  // a prefix of them. Must mirror the Node build exactly or the two
+  // produce different wire bytes for the same input.
+  const fixedIdx = [];
+  const variableIdx = [];
+  for (let i = 0; i < declaredFields.length; i++) {
+    if (_fixedSize(declaredTypes[i]) !== null) fixedIdx.push(i);
+    else variableIdx.push(i);
+  }
+  const order = fixedIdx.concat(variableIdx);
+  const fields = order.map(i => declaredFields[i]);
+  const types  = order.map(i => declaredTypes[i]);
 
   const offsets = new Array(fields.length).fill(null);
   let cursor = 0;
@@ -158,12 +221,16 @@ function disposeSchema(schemaId) {
 }
 
 function _fixedSize(type) {
+  // FIX (matches index.js): +1 for the leading type-code byte every value
+  // carries on the wire. Previously int32/float64/timestamp were
+  // under-counted by 1 byte, corrupting offsets for any schema with 2+
+  // fixed-size fields.
   switch (type) {
-    case 'bool':    return 1;
-    case 'int32':   return 4;
-    case 'float64': return 8;
-    case 'timestamp': return 8;
-    default:        return null;
+    case 'bool':      return 1;
+    case 'int32':     return 1 + 4;
+    case 'float64':   return 1 + 8;
+    case 'timestamp': return 1 + 8;
+    default:          return null;
   }
 }
 
@@ -366,6 +433,13 @@ function _checkMagic(u8) {
   }
   if (u8[0] !== MAGIC0 || u8[1] !== MAGIC1) {
     throw new Error(`Invalid KRSON magic bytes: 0x${u8[0].toString(16)} 0x${u8[1].toString(16)}`);
+  }
+  if (u8[2] !== VERSION) {
+    throw new Error(
+      `KRSON version mismatch: buffer was encoded with wire format v${u8[2]}, ` +
+      `but this library is v${VERSION}. Buffers from different KRSON versions ` +
+      `are not guaranteed to be compatible — re-encode with the current version.`
+    );
   }
 }
 

@@ -1,7 +1,7 @@
 {
   "name": "krson-js",
-  "version": "5.0.1",
-  "description": "KRSON v5 — High-performance binary serialization. Native arrays/maps, ZigZag , offset tables, string dedup. 2-5x faster, 30-50% smaller than JSON.",
+  "version": "6.0.0",
+  "description": "KRSON v6 — High-performance binary serialization. Native arrays/maps, ZigZag, offset tables, string dedup, all fixed-size fields get true O(1) access. 2-5x faster, 30-50% smaller than JSON for read-heavy / partial-access workloads.",
   "main": "index.js",
   "browser": "browser.js",
   "exports": {
@@ -17,7 +17,12 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node test.js"
+    "test": "npm run test:unit && npm run test:legacy",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest",
+    "test:legacy": "node --expose-gc test.js && node --expose-gc test1.js && node --expose-gc test2.js && node --expose-gc testhigh.js",
+    "fuzz": "node fuzz.js",
+    "fuzz:deep": "node fuzz.js --iterations=200000"
   },
   "keywords": [
     "binary",
@@ -29,16 +34,19 @@
     "protocol"
   ],
   "author": "Utkarsh Keshari <utkarsh.k.keshari@gmail.com>",
-  "license": "CC-BY-4.0",
+  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/utkarshbanka/KRSON"
+    "url": "https://github.com/utkarshbanka/KRSON-JS"
   },
-  "homepage": "https://github.com/utkarshbanka/KRSON#readme",
+  "homepage": "https://github.com/utkarshbanka/KRSON-JS#readme",
   "engines": {
-    "node": ">=16.0.0"
+    "node": ">=18.0.0"
   },
   "bin": {
     "krson-js": "./index.js"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.9"
   }
 }
