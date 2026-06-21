@@ -1,0 +1,101 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch: {}
+
+jobs:
+  test:
+    name: Test (Node ${{ matrix.node-version }} on ${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        node-version: [18.x, 20.x, 22.x]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js ${{ matrix.node-version }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run Vitest suite (unit + fuzz tests)
+        run: npx vitest run --reporter=verbose
+
+      - name: Run correctness + benchmark suite (test.js)
+        run: node --expose-gc test.js
+
+      - name: Run memory benchmark (test1.js)
+        run: node --expose-gc test1.js
+
+      - name: Run large-data / O(1) verification suite (test2.js)
+        run: node --expose-gc test2.js
+
+      - name: Run high-payload stress benchmark (testhigh.js)
+        run: node --expose-gc testhigh.js
+
+  lint-syntax:
+    name: Syntax check (index.js / browser.js)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Check index.js syntax
+        run: node -c index.js
+
+      - name: Check browser.js syntax
+        run: node -c browser.js
+
+  browser-node-parity:
+    name: Browser/Node wire-format parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.x
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify Node and Browser builds produce identical wire bytes
+        run: |
+          node -e "
+            const node = require('./index.js');
+            const browser = require('./browser.js');
+            const defShape = { tag: 'string', flag1: 'bool', count: 'int32', ratio: 'float64' };
+            const nodeSchema = node.defineSchema(defShape);
+            const browserSchema = browser.defineSchema(defShape);
+            if (nodeSchema.id !== browserSchema.id) {
+              console.error('Schema ID drift between Node and Browser registries — cannot compare bytes directly in this harness.');
+              process.exit(1);
+            }
+            const obj = { tag: 'x', flag1: true, count: 42, ratio: 2.5 };
+            const nodeBuf = Buffer.from(nodeSchema.encode(obj));
+            const browserBuf = Buffer.from(browserSchema.encode(obj));
+            if (!nodeBuf.equals(browserBuf)) {
+              console.error('MISMATCH: Node and Browser builds produced different wire bytes for the same input.');
+              process.exit(1);
+            }
+            console.log('OK: Node and Browser builds are byte-identical for this schema.');
+          "
